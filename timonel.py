@@ -88,7 +88,7 @@ class TimonelDeviceSettings(ctypes.BigEndianStructure):
                         Printable representation 
                 """
                 return ("TimonelDeviceSettings(\n" 
-                        "LFuse:{0:02X}, HFuse:{1:02X}, EFuse:{2:02X}, Lock{3:02X},\n"
+                        "LFuse:{0:02X}, HFuse:{1:02X}, EFuse:{2:02X}, Lock:{3:02X},\n"
                         "Sig: {4:02X}, {5:02X}, {6:02X}, Cal 8MHz:{7:02X}, Cal 6.4MHz:{7:02X})").format(
                                 self.low_fuse_bits,    self.high_fuse_bits,   self.extended_fuse_bits, self.lock_bits,
                                 self.signature_byte_0, self.signature_byte_1, self.signature_byte_2,
@@ -99,7 +99,6 @@ class Timonel:
         """ 
                 Timonel bootloader I2C master
         """
-
         # Timonel commands always form the first byte. A valid response is the 1-complement
         CMD_NO_OP    = 0x00
         CMD_RESETMCU = 0x80
@@ -170,32 +169,54 @@ class Timonel:
                 if self.verbose >= vlevel:
                         print(msg.format(*args))
 
-        def __i2c(self, writeBytes, responseLength=1):
-                """ 
-                        Execute a timonel command, receive a response and validate it for length and ACK.
-                        See TwiCmdXmit in C++ version
+        def __i2cRaw(self, writeBytes, responseLength):
                 """
-                # Create read and write commands
+                        Execute an I2C write followed by a read,
+                        with no checks on returned values.
+                """
+                # Create write and read commands
                 w = smbus2.i2c_msg.write(self.addr, writeBytes)
                 r = smbus2.i2c_msg.read(self.addr, responseLength)
-                
-                self.__trace(2, "Write: {0}", [hex(x) for x in writeBytes])
-                
-                # Execute one write followed by a read
+                # Execute I2C commands
                 self.bus.i2c_rdwr(w, r)
-                readBytes = bytes(r)
+                # Return bytes
+                return bytes(r)
 
-                self.__trace(2, "Read: {0}", [hex(x) for x in readBytes])
-                
-                # Check the first byte read is 1s complement of first byte written
-                if (readBytes[0]) != writeBytes[0] ^ 0xFF:
-                        raise Exception("ACK failure")
+        def __i2c(self, writeBytes, responseLength=1, attempts=1, retryDelay=0):
+                """ 
+                        Execute a Timonel command, validate the response.
+                        Include retry and logic
+                """
+                attempt = 1
+                while attempt <= attempts:
+                        try:
+                                self.__trace(2, "__i2c Write: {0}", [hex(x) for x in writeBytes])
+                                readBytes = self.__i2cRaw(writeBytes, responseLength)
+                                self.__trace(2, "__i2c Read: {0}", [hex(x) for x in readBytes])
 
-                # Check expected length
-                if len(readBytes) != responseLength:
-                        raise Exception("Response length error")
+                                # Check the first byte read is 1s complement of first byte written
+                                if readBytes[0] != (writeBytes[0] ^ 0xFF):
+                                        raise Exception("ACK Error")
 
-                return readBytes
+                                # Check correct number of bytes have been returned
+                                if len(readBytes) != responseLength:
+                                        raise Exception("Response length error")
+
+                                # TODO - Optional checksum logic
+
+                                # Success - return data skipping the first byte
+                                return readBytes[1:]
+                        except:
+                                # If the retry limit has been reached, give up
+                                if attempt == attempts:
+                                        raise
+                                else:
+                                        # Try again
+                                        self.__trace(1, "Retrying")
+                                        # Wait a bit
+                                        if retryDelay > 0:
+                                                time.sleep(retryDelay)
+                                        attempt += 1
 
         @staticmethod
         def __checksum(data1,data2=[]):
@@ -212,14 +233,14 @@ class Timonel:
 
         def NoOp(self):
                 """ 
-                        Say "hi" to the device, not expecting it to do anything but respond
+                        Ping the device
                 """
                 self.__trace(1, "NoOp")
                 self.__i2c([self.CMD_NO_OP])
 
         def ResetMicrocontroller(self):
                 """
-                        Reset MCU 
+                        Reset MCU
                 """
                 self.__trace(1, "ResetMicrocontroller")
                 self.__i2c([self.CMD_RESETMCU])
@@ -238,7 +259,7 @@ class Timonel:
                 """
                 self.__trace(1, "GetStatus")
                 r = self.__i2c([self.CMD_GETTMNLV], 12)                
-                return TimonelStatus.from_buffer_copy(r, 1)
+                return TimonelStatus.from_buffer_copy(r)
 
         # TODO DELETE FLASH
         # TODO SET FLASH BASE PAGE ADDRESS
@@ -266,13 +287,13 @@ class Timonel:
                 # 4 bytes in: Command, high byte of address, low byteof adddress, length
                 # Response is ack code + data + checksum
                 r = self.__i2c([self.CMD_READFLSH, startAddress>>8, startAddress & 0xFF, length], 2+length)
-                data = r[1:-1]
+                byts = r[0:-1]
                 chk  = r[-1]
                 # The data AND the two address bytes should be included in checksum
-                if self.__checksum(data,[startAddress>>8,startAddress & 0xFF]) != chk:
+                if self.__checksum(byts,[startAddress>>8,startAddress & 0xFF]) != chk:
                         print(r)
                         raise Exception("Readflash: Checksum error")
-                return data
+                return byts
 
         def ReadDeviceSignatureAndFuses(self):
                 """ 
@@ -280,7 +301,7 @@ class Timonel:
                 """
                 self.__trace(1, "ReadDeviceSignatureAndFuses")
                 r = self.__i2c([self.CMD_READDEVS], 10)                
-                return TimonelDeviceSettings.from_buffer_copy(r, 1)
+                return TimonelDeviceSettings.from_buffer_copy(r)
 
         def WriteByteToEEPROM(self, startAddress, byt):
                 """
@@ -288,8 +309,8 @@ class Timonel:
                 """
                 self.__trace(1, "WriteByteToEEPROM")
                 r = self.__i2c([self.CMD_WRITEEPR, startAddress>>8, startAddress & 0xFF, byt], 2)
-                chk = r[1]
-                if self.__checksum([startAddress>>8, startAddress & 0xFF, byt]) != chk:
+                chk = r[-1]
+                if self.__checksum([byt],[startAddress>>8, startAddress & 0xFF]) != chk:
                         raise Exception("Write EEPROM: Checksum error")
 
         def ReadByteFromEEPROM(self, startAddress):
@@ -298,11 +319,11 @@ class Timonel:
                 """
                 self.__trace(1, "ReadByteFromEEPROM {0:04X}".format(startAddress))
                 r = self.__i2c([self.CMD_READEEPR, startAddress>>8, startAddress & 0xFF], 3)
-                byt = r[1]
-                chk = r[2]
-                if self.__checksum([byt,startAddress>>8,startAddress & 0xFF]) != chk:
+                byts = r[0:-1]
+                chk = r[-1]
+                if self.__checksum(byts,[startAddress>>8,startAddress & 0xFF]) != chk:
                         raise Exception("Read EEPROM Checksum error")
-                return byt        
+                return byts[0]
 
 ### Begin ###
 
