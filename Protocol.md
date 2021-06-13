@@ -20,7 +20,7 @@ These are notes to assist implementation; they are not definitive.
 
 ## Sequence diagrams
 
-I'm using mermaid for this, and it will be interesting to see if it renders as anything meaningful in GitHub.
+I'm using mermaid for sequence diagrams. These are not processed natively by GitHub, so if you see no pictures below, try installed a browser extension such as "Github + Mermaid".
 
 ### DeleteApplication()
 
