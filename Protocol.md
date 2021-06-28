@@ -3,6 +3,9 @@
 ## Summary
 These are notes to assist implementation; they are not definitive.
 
+Upcoming - in the 1.6 release, all two-byte addresses will become little-endian throughout
+(see discussion in the main timonel project).
+
 | Command  | T0 | T1       | T2       |    | R0 | R1                 | R2 | 
 |----------|----|----------|----------|----|----|--------------------|----|
 | NO_OP    | 00 |          |          |    | FF |                    |    |
@@ -23,7 +26,7 @@ These are notes to assist implementation; they are not definitive.
 I'm using mermaid for sequence diagrams. These are not processed natively by GitHub, so if you see no pictures below, try installed a browser extension such as "Github + Mermaid".
 
 ### DeleteApplication()
-
+Delete user application
 ```mermaid
 sequenceDiagram
     participant L as Loader
@@ -33,7 +36,7 @@ sequenceDiagram
     L->>L: Wait 750ms
     L->>+M: NO_OP
     M-->>-L: UNKNOWNC
-    Note over L,M: BootloaderInit()
+    Note over L,M: Continue to BootloaderInit()
 ```
 ### BootloaderInit()
 ```mermaid
@@ -61,16 +64,57 @@ sequenceDiagram
     M-->>-L: ACKTMNLV, 12 bytes
 ```
 ### UploadApplication(payload[], payload_size, uint16_t start_address)
+Upload payload to MCU running Timonel
+
+If AUTO_PAGE_ADDR is enabled, bootloader calculates addresses
 ```mermaid
 sequenceDiagram
     participant L as Loader
     participant M as Mcu
-    alt AUTO_PAGE_ADDRESS
-    Note over L,M: Auto
-    else
-    Note over L,M: NOT AUTO
+    opt payload_size <= bootloader_start-TRAMPOLINE_LEN
+        Note Right of M: No action, fits
+    end
+
+    Note over L,M: Common
+    loop for each packet
+        Note right of L: Variable packet sizes
+        L->>+M: SendDataPacket(packet)
+        M-->>-L: ack
+        L->>L: Delay DLY_PKT_SEND
+        opt packet errors>0
+            Note over L,M: DeleteApplication() and quit
+        end
+        opt page end detected && NOT AUTO_PAGE_ADDR
+            L->>L: Delay DLY_FLASH_PG
+            L->>+M: SetPageAddress(start address+next page)
+            M-->>-L: ack
+        end
+        L->>L: Delay DLY_FLASH_PG
     end
 ```
+If AUTO_PAGE_ADDR is disabled, loader calculates pages addresses.
+Features must have F_AUTO_PAGE_ADDR
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant M as Mcu
+    opt startAddress >= SPM_PAGESIZE
+        Note Right of M: Fix reset vector to jump to Timonel
+        L->>+M: FillSpecialPage(RST_PAGE)
+        M-->>-L: ack
+        L->>+M: SetPageAddress(start_address)
+        M-->>-L: ack
+        L-->>L: Delay FLASH_FG
+    end
+    opt payload_size <= bootloader_start-TRAMPOLINE_LEN
+        Note Right of M: Check app fits in memory
+        L->>+M: FillSpecialPage(TPL_PAGE, payload[1], payload[0])
+        M-->>-L: ack
+        L->>+M: SetPageAddress(startAddress)
+        M-->>-L: ack
+        L-->>L: Delay FLASH_FG
+    end
+``` 
 ### RunApplication()
 ```mermaid
 sequenceDiagram
@@ -78,6 +122,9 @@ sequenceDiagram
     participant M as Mcu
     L->>+M:EXITTMNL
     M-->>-L:ACKEXITT
+    L->>+M: GETTMNLV
+    Note Right of M: needed to force Timonel exit
+    M-->>-L: ACKTMLNV
 ```
 
 ## To add:
