@@ -12,6 +12,7 @@ Having said that, I am interested in bug reports and suggestions for improvement
 - All communication to the device checks that the first byte is a correct ACK, and where appropriate calculates checkums, but does not retry on failure.
 - There are no delays for certain actions that might need them.
 - Assumptions about buffer sizes are optimistic.
+- I am tracking V1.6 as this has a more consistent little-endian structure throughout.
 
 ## How do you attach a PC to I2C?
 

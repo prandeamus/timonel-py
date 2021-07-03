@@ -13,7 +13,10 @@ import smbus2
 import ctypes
 import time
 
-class TimonelStatus(ctypes.BigEndianStructure):
+
+
+
+class TimonelStatus(ctypes.LittleEndianStructure):
         """ Timonel Status code returned by GETTMLV """
         _pack_ = 1 # Byte packing
         _fields_ = [
@@ -42,7 +45,6 @@ class TimonelStatus(ctypes.BigEndianStructure):
                 ("application_start",  ctypes.c_uint16),    # Trampoline bytes pointing to application launch, if existing
                 ("low_fuse_setting",   ctypes.c_uint8),     # Low fuse bits
                 ("oscillator_cal",     ctypes.c_uint8)      # Internal RC oscillator calibration
-                #("trampoline_addr",    ctypes.c_uint16)    # Application start absolute address (deprecated from v1.5)
         ]
 
         def __repr__(self):
@@ -58,7 +60,7 @@ class TimonelStatus(ctypes.BigEndianStructure):
                         self.signature,        self.version_major,    self.version_minor, 
                         # Features
                         self.enable_led_ui,    self.auto_page_addr,   self.app_use_tpl_pg, self.cmd_setpgaddr, 
-                        self.two_step_init,    self.use_wdt_reset,    self.app_autorun, self.cmd_readflash,
+                        self.two_step_init,    self.use_wdt_reset,    self.app_autorun,    self.cmd_readflash,
                         # Extended features
                         self.auto_clk_tweak,   self.force_erase_page, self.clear_bit_7_R31, self.check_page_ix, 
                         self.cmd_readdevs,     self.eeprom_access,
@@ -66,7 +68,7 @@ class TimonelStatus(ctypes.BigEndianStructure):
                         self.low_fuse_setting, self.oscillator_cal
                 )
 
-class TimonelDeviceSettings(ctypes.BigEndianStructure):
+class TimonelDeviceSettings(ctypes.LittleEndianStructure):
         """ 
                 Timonel device settings 
         """
@@ -169,20 +171,21 @@ class Timonel:
                 if self.verbose >= vlevel:
                         print(msg.format(*args))
 
-        def __i2cRaw(self, writeBytes, responseLength):
+        def __i2cRaw(self, req, reqBytes, respLength):
                 """
-                        Execute an I2C write followed by a read,
-                        with no checks on returned values.
+                        Execute an I2C write followed by a read.
+                        Checks on the content that is read are handled by the caller.
                 """
                 # Create write and read commands
-                w = smbus2.i2c_msg.write(self.addr, writeBytes)
-                r = smbus2.i2c_msg.read(self.addr, responseLength)
+                w = smbus2.i2c_msg.write(self.addr, [req]+reqBytes)
+                r = smbus2.i2c_msg.read(self.addr, respLength)
                 # Execute I2C commands
                 self.bus.i2c_rdwr(w, r)
+
                 # Return bytes
                 return bytes(r)
 
-        def __i2c(self, writeBytes, responseLength=1, attempts=1, retryDelay=0):
+        def __i2c(self, req, reqBytes=[], respLength=1, attempts=1, retryDelay=0):
                 """ 
                         Execute a Timonel command, validate the response.
                         Include retry and logic
@@ -190,22 +193,20 @@ class Timonel:
                 attempt = 1
                 while attempt <= attempts:
                         try:
-                                self.__trace(2, "__i2c Write: {0}", [hex(x) for x in writeBytes])
-                                readBytes = self.__i2cRaw(writeBytes, responseLength)
-                                self.__trace(2, "__i2c Read: {0}", [hex(x) for x in readBytes])
+                                response = self.__i2cRaw(req, reqBytes, respLength)
 
-                                # Check the first byte read is 1s complement of first byte written
-                                if readBytes[0] != (writeBytes[0] ^ 0xFF):
+                                # Check the first byte read is 1s complement of command
+                                if response[0] != (req ^ 0xFF):
                                         raise Exception("ACK Error")
 
                                 # Check correct number of bytes have been returned
-                                if len(readBytes) != responseLength:
+                                if len(response) != respLength:
                                         raise Exception("Response length error")
 
                                 # TODO - Optional checksum logic
 
                                 # Success - return data skipping the first byte
-                                return readBytes[1:]
+                                return response[1:]
                         except:
                                 # If the retry limit has been reached, give up
                                 if attempt == attempts:
@@ -236,21 +237,21 @@ class Timonel:
                         Ping the device
                 """
                 self.__trace(1, "NoOp")
-                self.__i2c([self.CMD_NO_OP])
+                self.__i2c(self.CMD_NO_OP)
 
         def ResetMicrocontroller(self):
                 """
                         Reset MCU
                 """
                 self.__trace(1, "ResetMicrocontroller")
-                self.__i2c([self.CMD_RESETMCU])
+                self.__i2c(self.CMD_RESETMCU)
 
         def InitMicro(self):
                 """
                         Initialize firmware
                 """
                 self.__trace(1, "InitMicro")
-                self.__i2c([self.CMD_INITSOFT])
+                self.__i2c(self.CMD_INITSOFT)
 
         def GetStatus(self):
                 """ 
@@ -258,7 +259,7 @@ class Timonel:
                         Note we don't store the TimonelStatus inside the class. That may change.
                 """
                 self.__trace(1, "GetStatus")
-                r = self.__i2c([self.CMD_GETTMNLV], 12)                
+                r = self.__i2c(self.CMD_GETTMNLV, respLength=12)                
                 return TimonelStatus.from_buffer_copy(r)
 
         # TODO DELETE FLASH
@@ -271,7 +272,7 @@ class Timonel:
                         Exit Timonel (jump to app) 
                 """
                 self.__trace(1, "ExitTimonel")
-                self.__i2c([self.CMD_EXITTIML])
+                self.__i2c(self.CMD_EXITTIML)
 
         def ReadFlash(self, startAddress, length):
                 """ 
@@ -286,7 +287,7 @@ class Timonel:
                 
                 # 4 bytes in: Command, high byte of address, low byteof adddress, length
                 # Response is ack code + data + checksum
-                r = self.__i2c([self.CMD_READFLSH, startAddress>>8, startAddress & 0xFF, length], 2+length)
+                r = self.__i2c(self.CMD_READFLSH, [startAddress>>8, startAddress & 0xFF, length], 2+length)
                 byts = r[0:-1]
                 chk  = r[-1]
                 # The data AND the two address bytes should be included in checksum
@@ -300,7 +301,7 @@ class Timonel:
                         Read signature and fuses
                 """
                 self.__trace(1, "ReadDeviceSignatureAndFuses")
-                r = self.__i2c([self.CMD_READDEVS], 10)                
+                r = self.__i2c(self.CMD_READDEVS, respLength=10)                
                 return TimonelDeviceSettings.from_buffer_copy(r)
 
         def WriteByteToEEPROM(self, startAddress, byt):
@@ -308,7 +309,7 @@ class Timonel:
                         Write byte to EEPROM
                 """
                 self.__trace(1, "WriteByteToEEPROM")
-                r = self.__i2c([self.CMD_WRITEEPR, startAddress>>8, startAddress & 0xFF, byt], 2)
+                r = self.__i2c(self.CMD_WRITEEPR, [startAddress>>8, startAddress & 0xFF, byt], 2)
                 chk = r[-1]
                 if self.__checksum([byt],[startAddress>>8, startAddress & 0xFF]) != chk:
                         raise Exception("Write EEPROM: Checksum error")
@@ -318,7 +319,7 @@ class Timonel:
                         Read byte to EEPROM
                 """
                 self.__trace(1, "ReadByteFromEEPROM {0:04X}".format(startAddress))
-                r = self.__i2c([self.CMD_READEEPR, startAddress>>8, startAddress & 0xFF], 3)
+                r = self.__i2c(self.CMD_READEEPR, [startAddress>>8, startAddress & 0xFF], 3)
                 byts = r[0:-1]
                 chk = r[-1]
                 if self.__checksum(byts,[startAddress>>8,startAddress & 0xFF]) != chk:
@@ -327,7 +328,7 @@ class Timonel:
 
 ### Begin ###
 
-bus = 9     # I2C bus. My PC has /dev/i2c-9. Yours may vary. For Raspberry Pi, try /dev/i2c-1 
+bus = 6     # I2C bus. My PC has /dev/i2c-9. Yours may vary. For Raspberry Pi, try /dev/i2c-1 
 addr = 0x0B # I2C address of timonel device on bus
 
 print("No guarantees. If you trash your PC or your device, I'm not liable!")
